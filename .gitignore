@@ -1,0 +1,21 @@
+venv/
+output/
+__pycache__/
+*.pyc
+.DS_Store
+~$*.xlsx
+*.spec
+build/
+dist/
+
+# 数据文件不提交
+*.xlsx
+*.xls
+
+# 诊断文件不提交
+diagnose*.py
+sdcc_login.py
+page_source.html
+
+# 截图不提交
+*.png
