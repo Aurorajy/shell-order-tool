@@ -19,3 +19,6 @@ page_source.html
 
 # 截图不提交
 *.png
+
+# 敏感信息
+.env

@@ -1,7 +1,8 @@
 """
 壳牌运输订单调度工具
 将 SDCC 导出的订单明细表 + 客户邮件发来的订单表，按单号匹配合并，
-再按「省份 → 承运商」映射拆分为各承运商的独立 Excel 文件。
+再按「省份 → 承运商」映射拆分为各承运商的独立 Excel 文件，
+并自动发送邮件给各承运商。
 
 用法：把所有 Excel 文件丢入脚本同目录，运行 python3 order_merge.py 即可。
 """
@@ -9,8 +10,15 @@
 import os
 import re
 import sys
+import smtplib
+import socket
+from collections import Counter
+from datetime import datetime, timedelta
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 import pandas as pd
-from datetime import datetime
 
 # ============================================================
 # 配置区
@@ -33,26 +41,65 @@ CARRIER_MAP = {
                "广东", "贵州", "云南", "广西", "浙江", "上海", "江苏"],
 }
 
+# ============================================================
+# 从 .env 加载配置
+# ============================================================
+def _load_env():
+    env_path = os.path.join(SCRIPT_DIR, ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    key, val = key.strip(), val.strip()
+                    if key not in os.environ:
+                        os.environ[key] = val
+
+_load_env()
+
+# ============================================================
+# 邮件配置
+# ============================================================
+EMAIL_CONFIG = {
+    "smtp_server": "smtp.qq.com",
+    "smtp_port": 587,              # 465 SSL / 587 STARTTLS
+    "sender": os.environ["QQ_EMAIL"],
+    "auth_code": os.environ["QQ_AUTH_CODE"],
+    "timeout": 30,
+}
+
+# 承运商 → 收件邮箱（待补充完整）
+CARRIER_EMAILS = {
+    "奥联":   "",                                  # TODO
+    "富力达": "auroraqjy@163.com",
+    "汇利":   "",                                  # TODO
+    "联众":   "",                                  # TODO
+    "津京通达": "",                                 # TODO
+    "金博通": "",                                   # TODO
+}
+
 # 表1（SDCC 导出）列索引（0-based）
 T1_ORDER_NO      = 1    # B列 - 单号
 T1_ORDER_TYPE    = 20   # U列 - 订单类型
-T1_PROVINCE      = 39   # AN列 - 目的地省份
 T1_CONSIGNEE     = 36   # AK列 - 收货方
-T1_ADDRESS       = 42   # AQ列 - 收货地址
-T1_CITY          = 40   # AO列 - 城市
-T1_GROSS_WEIGHT  = 178  # FW列 - 毛量KG
+T1_ADDRESS       = 24   # Y列 - 收货地址
+T1_CITY          = 25   # Z列 - 城市
+T1_GROSS_WEIGHT  = 169  # FN列 - 毛量KG
 T1_MATERIAL_NO   = 161  # FF列 - 物料号
 T1_MATERIAL_NAME = 162  # FG列 - 物料名称
 T1_QUANTITY      = 167  # FL列 - 数量
 T1_UNIT_TYPE     = 168  # FM列 - 单位类型(KAR/EA)
-T1_VOLUME        = 179  # FX列 - 体积L（需 *1000）
+T1_VOLUME        = 170  # FO列 - 体积L（需 *1000）
 T1_CONTACT       = 50   # AY列 - 收货方联系人
 T1_BT_DATE       = 71   # BT列 - SDCC 日期（用于匹配客户子表日期）
 
 # 表2（客户邮件）列索引（0-based）
-T2_ORDER_NO = 0    # A列 - 单号
-T2_GKA      = 4    # E列 - GKA
-T2_REMARK   = 13   # N列 - 备注
+T2_ORDER_NO  = 0    # A列 - 单号
+T2_GKA       = 4    # E列 - GKA
+T2_PROVINCE  = 9    # J列 - 省份
+T2_REMARK    = 13   # N列 - 备注
+T2_OTIF      = 16   # Q列 - OTIF
 
 
 # ============================================================
@@ -68,6 +115,10 @@ def parse_date_any(value):
         return None
     s = re.sub(r'\.0$', '', s)
 
+    # 日期+时间: 2026-06-16 05:02:33
+    m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s+\d{1,2}:\d{2}', s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
     # 完整日期: 2026-06-15, 2026/06/15
     m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$', s)
     if m:
@@ -93,6 +144,13 @@ def parse_sheet_date(sheet_name, year_hint=None, month_hint=None):
     """解析子表名中的日期，如 '6.15' → (year, month, day)
     year_hint/month_hint 来自文件名上下文"""
     s = str(sheet_name).strip()
+    # 0616 (4位 MMDD)
+    m = re.match(r'^(\d{2})(\d{2})$', s)
+    if m:
+        month = int(m.group(1))
+        day = int(m.group(2))
+        year = year_hint or datetime.now().year
+        return (year, month, day)
     # 6.15 或 06.15
     m = re.match(r'^(\d{1,2})\.(\d{1,2})$', s)
     if m:
@@ -160,7 +218,6 @@ def date_match(d1, d2):
         return False
     if d1[0] != d2[0] or d1[1] != d2[1]:
         return False
-    # 天级别比较：双方都有天才比较
     if d1[2] is not None and d2[2] is not None:
         return d1[2] == d2[2]
     return True
@@ -193,13 +250,54 @@ def get_output_subdir(base_dir, date_tuple):
 
 
 # ============================================================
+# 邮件发送
+# ============================================================
+
+def send_email(receiver, subject, body, attachment_path):
+    """发送单封带附件的邮件。成功返回 True"""
+    config = EMAIL_CONFIG
+    msg = MIMEMultipart()
+    msg["From"] = config["sender"]
+    msg["To"] = receiver
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    with open(attachment_path, "rb") as f:
+        part = MIMEBase("application", "octet-stream")
+        part.set_payload(f.read())
+    encoders.encode_base64(part)
+    part.add_header("Content-Disposition", "attachment",
+                    filename=os.path.basename(attachment_path))
+    msg.attach(part)
+
+    for port in [config["smtp_port"], 465, 587]:
+        use_ssl = (port == 465)
+        try:
+            if use_ssl:
+                server = smtplib.SMTP_SSL(config["smtp_server"], port,
+                                          timeout=config["timeout"])
+            else:
+                server = smtplib.SMTP(config["smtp_server"], port,
+                                      timeout=config["timeout"])
+                server.starttls()
+            server.login(config["sender"], config["auth_code"])
+            server.sendmail(config["sender"], [receiver], msg.as_string())
+            server.quit()
+            return True
+        except Exception:
+            continue
+    return False
+
+
+# ============================================================
 # 文件读取
 # ============================================================
 
 def find_files(directory):
     """扫描目录，识别 SDCC 文件和客户文件"""
     all_xlsx = [f for f in os.listdir(directory)
-                if f.endswith(('.xlsx', '.xls')) and not f.startswith('~$')]
+                if f.endswith(('.xlsx', '.xls'))
+                and not f.startswith(('~$', '.~'))]
 
     sdcc_file = None
     customer_files = []
@@ -225,7 +323,6 @@ def read_sdcc(filepath):
     cols = {
         'order_no':      T1_ORDER_NO,
         'order_type':    T1_ORDER_TYPE,
-        'province':      T1_PROVINCE,
         'consignee':     T1_CONSIGNEE,
         'address':       T1_ADDRESS,
         'city':          T1_CITY,
@@ -279,10 +376,8 @@ def read_customer(filepath, target_date=None, filename_date=None):
 
     results = []
     for sheet_name in xl.sheet_names:
-        # 用文件名年月上下文解析 sheet 名日期
         sheet_date = parse_sheet_date(sheet_name, year_hint=year_hint, month_hint=month_hint)
 
-        # 有目标日期且 sheet 日期可解析 → 必须匹配
         if target_date and sheet_date:
             if not date_match(target_date, sheet_date):
                 continue
@@ -300,7 +395,9 @@ def read_customer(filepath, target_date=None, filename_date=None):
         cols = {
             'order_no': T2_ORDER_NO,
             'gka':      T2_GKA,
+            'province': T2_PROVINCE,
             'remark':   T2_REMARK,
+            'otif':     T2_OTIF,
         }
         result = pd.DataFrame()
         for name, idx in cols.items():
@@ -318,20 +415,20 @@ def read_customer(filepath, target_date=None, filename_date=None):
 
 
 def extract_sdcc_date(sdcc_raw):
-    """从 SDCC 原始 DataFrame 的 BT 列提取完整日期（精确到天）"""
+    """从 SDCC 原始 DataFrame 的 BT 列提取完整日期（精确到天）。
+    跳过表头行，取出现次数最多的日期。"""
     if T1_BT_DATE >= len(sdcc_raw.columns):
         return None
-    col = sdcc_raw.iloc[:, T1_BT_DATE].dropna()
-    for val in col:
+    col = sdcc_raw.iloc[:, T1_BT_DATE]
+    dates = []
+    for val in col.dropna():
         d = parse_date_any(val)
         if d and d[2] is not None:
-            return d
-    # 回退：接受只有年月
-    for val in col:
-        d = parse_date_any(val)
-        if d:
-            return d
-    return None
+            dates.append((d[0], d[1], d[2]))
+    if not dates:
+        return None
+    most = Counter(dates).most_common(1)[0][0]
+    return most
 
 
 # ============================================================
@@ -377,44 +474,41 @@ def merge_and_process(sdcc_df, customer_dfs):
         customer = pd.concat(customer_dfs, ignore_index=True)
         customer = customer.drop_duplicates(subset=['order_no_for_match'], keep='first')
     else:
-        customer = pd.DataFrame(columns=['order_no_for_match', 'gka', 'remark'])
+        customer = pd.DataFrame(columns=['order_no_for_match', 'gka', 'province', 'remark', 'otif'])
 
     merged = sdcc_df.merge(
-        customer[['order_no_for_match', 'gka', 'remark']],
+        customer[['order_no_for_match', 'gka', 'province', 'remark', 'otif']],
         on='order_no_for_match',
         how='left'
     )
 
+    # 省份来自表2 J列，据此匹配承运商
     merged['carrier'] = merged['province'].apply(get_carrier)
     merged['unit_calc'] = merged.apply(calc_unit, axis=1)
 
     master = pd.DataFrame()
-    master['GKA']              = merged['gka']
-    master['订单类型']          = merged['order_type']
-    master['承运商']            = merged['carrier']
-    master['SHELL交货号']       = merged['order_no']
-    master['行号']              = ''
-    master['物料号']            = merged['material_no']
-    master['收货方']            = merged['consignee']
-    master['收货地址']          = merged['address']
-    master['收货地址2']         = ''
-    master['省份']              = merged['province']
-    master['城市']              = merged['city']
-    master['毛量KG']            = merged['gross_weight']
-    master['物料名称']          = merged['material_name']
-    master['数量']              = merged['quantity']
-    master['单位']              = merged['unit_calc']
-    master['体积L']             = pd.to_numeric(merged['volume'], errors='coerce') * 1000
-    master['最迟装车时间']       = ''
-    master['客户要求交货时间']   = ''
-    master['最迟交货时间']       = ''
-    master['收货方联系人']      = merged['contact']
-    master['SHELL途径']         = ''
-    master['OTIF']              = ''
-    master['备注']              = merged['remark']
+    master['GKA']                  = merged['gka']
+    master['订单类型']              = ''
+    master['预约时间']              = ''
+    master['合提']                  = ''
+    master['承运商']                = merged['carrier']
+    master['客户订单']              = merged['order_no']
+    master['目的地（省）']          = merged['province']
+    master['目的地（市）']          = merged['city']
+    master['目的地']                = merged['consignee']
+    master['目的地（详细地址）']    = merged['address']
+    master['收货方联系电话']        = merged['contact']
+    master['物料编码']              = merged['material_no']
+    master['物料名称']              = merged['material_name']
+    master['数量']                  = merged['quantity']
+    master['单位']                  = merged['unit_calc']
+    master['重量']                  = merged['gross_weight']
+    master['体积']                  = pd.to_numeric(merged['volume'], errors='coerce') * 1000
+    master['OTIF']                  = merged['otif']
+    master['备注']                  = merged['remark']
 
     master = master.sort_values(
-        by=['承运商', '省份', '城市'],
+        by=['承运商', '目的地（省）', '目的地（市）'],
         ascending=[True, True, True],
         na_position='last'
     ).reset_index(drop=True)
@@ -422,41 +516,78 @@ def merge_and_process(sdcc_df, customer_dfs):
     return master
 
 
-def write_output(master, output_dir):
-    """写入总表和各承运商分表"""
-    os.makedirs(output_dir, exist_ok=True)
+# ============================================================
+# 输出与发送
+# ============================================================
 
+def auto_fit_columns(filepath):
+    """打开已生成的 xlsx，自动调整每列宽度"""
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+    wb = load_workbook(filepath)
+    for ws in wb.worksheets:
+        for col_cells in ws.columns:
+            max_len = 0
+            col_letter = get_column_letter(col_cells[0].column)
+            for cell in col_cells:
+                val = str(cell.value) if cell.value is not None else ''
+                char_len = 0
+                for ch in val:
+                    char_len += 2 if '一' <= ch <= '鿿' or '　' <= ch <= '〿' or '＀' <= ch <= '￯' else 1
+                max_len = max(max_len, char_len)
+            adjusted = min(max_len + 4, 60)
+            adjusted = max(adjusted, 6)
+            ws.column_dimensions[col_letter].width = adjusted
+    wb.save(filepath)
+
+
+def write_and_send(master, output_dir):
+    """写入总表和各承运商分表，并发送邮件"""
+    os.makedirs(output_dir, exist_ok=True)
+    date_str = os.path.basename(output_dir.rstrip('/').rstrip('\\'))
+
+    # 调度总表
     master_path = os.path.join(output_dir, '调度总表.xlsx')
     with pd.ExcelWriter(master_path, engine='openpyxl') as writer:
         master.to_excel(writer, sheet_name='全部订单', index=False)
-
-        no_gka = master[master['GKA'].isna() | (master['GKA'] == '')]
-        if len(no_gka) > 0:
-            no_gka.to_excel(writer, sheet_name='未匹配GKA', index=False)
-
         no_carrier = master[master['承运商'].isna() | (master['承运商'] == '')]
         if len(no_carrier) > 0:
-            no_carrier.to_excel(writer, sheet_name='未分配承运商', index=False)
+            no_carrier.to_excel(writer, sheet_name='未匹配承运商', index=False)
+    auto_fit_columns(master_path)
 
     print(f"\n✓ 总表: {master_path}")
     print(f"  总行数: {len(master)}")
-    no_gka_count = master['GKA'].isna().sum() + (master['GKA'] == '').sum()
     no_carrier_count = master['承运商'].isna().sum() + (master['承运商'] == '').sum()
-    if no_gka_count > 0:
-        print(f"  ⚠ 未匹配到 GKA: {no_gka_count} 行 → 见「未匹配GKA」sheet")
     if no_carrier_count > 0:
         unassigned = master[(master['承运商'].isna()) | (master['承运商'] == '')]
-        provinces = unassigned['省份'].dropna().unique()
-        print(f"  ⚠ 未分配承运商: {no_carrier_count} 行 (省份: {list(provinces)}) → 见「未分配承运商」sheet")
+        provinces = unassigned['目的地（省）'].dropna().unique()
+        print(f"  ⚠ 未匹配承运商: {no_carrier_count} 行 (省份: {list(provinces)}) → 见「未匹配承运商」sheet")
 
+    # 各承运商分表
+    print("\n📧 发送邮件...")
     for carrier in CARRIER_MAP:
         subset = master[master['承运商'] == carrier]
         if len(subset) == 0:
-            print(f"  - {carrier}: 0 行，跳过")
             continue
         path = os.path.join(output_dir, f'{carrier}.xlsx')
         subset.to_excel(path, index=False)
-        print(f"  - {carrier}: {len(subset)} 行 → {carrier}.xlsx")
+        auto_fit_columns(path)
+        print(f"  {carrier}: {len(subset)} 行 → {carrier}.xlsx", end="")
+
+        # 发送邮件
+        receiver = CARRIER_EMAILS.get(carrier, "")
+        if not receiver:
+            print(" (未配置邮箱，跳过发送)")
+            continue
+
+        subject = f"壳牌订单调度表_{date_str}"
+        body = "请查收今日订单，附件为贵司配送明细。"
+        if send_email(receiver, subject, body, path):
+            print(f" → 已发送至 {receiver}")
+        else:
+            print(f" → 发送失败！({receiver})")
+
+    print("")
 
 
 # ============================================================
@@ -492,6 +623,14 @@ def main():
     else:
         print("   ⚠ 未能从 SDCC BT 列提取日期")
 
+    # 客户子表日期 = SDCC 日期 + 1 天（客户发的是次日发货计划）
+    if sdcc_date:
+        dt = datetime(sdcc_date[0], sdcc_date[1], sdcc_date[2]) + timedelta(days=1)
+        customer_target_date = (dt.year, dt.month, dt.day)
+        print(f"   客户子表匹配日期 (SDCC+1): {date_to_str(customer_target_date)}")
+    else:
+        customer_target_date = None
+
     # 读取客户文件，按日期匹配子表
     print("\n📖 读取客户文件（按日期匹配子表）...")
     customer_dfs = []
@@ -499,10 +638,9 @@ def main():
         fn_date = extract_filename_date(f)
         print(f"   文件 {f}: 文件名日期={date_to_str(fn_date) if fn_date else '无'}")
 
-        # 拿 SDCC 日期去匹配客户文件中的子表
         sheets = read_customer(
             os.path.join(SCRIPT_DIR, f),
-            target_date=sdcc_date,
+            target_date=customer_target_date,
             filename_date=fn_date
         )
         for sdf in sheets:
@@ -519,7 +657,7 @@ def main():
     matched = (master['GKA'].notna() & (master['GKA'] != '')).sum()
     print(f"   匹配成功: {matched} / {len(master)} 行")
 
-    # 输出目录：用 SDCC 日期精确到天
+    # 输出目录
     date_for_output = sdcc_date
     if not date_for_output:
         for f in customer_files:
@@ -533,9 +671,9 @@ def main():
     output_base = os.path.join(SCRIPT_DIR, 'output')
     output_dir = get_output_subdir(output_base, date_for_output)
     print(f"\n📝 输出目录: {output_dir}")
-    write_output(master, output_dir)
+    write_and_send(master, output_dir)
 
-    print("\n✅ 完成！")
+    print("✅ 完成！")
 
 
 if __name__ == "__main__":
