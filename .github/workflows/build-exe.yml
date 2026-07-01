@@ -27,10 +27,12 @@ jobs:
         run: python -c "import selenium; print('selenium version:', selenium.__version__)"
 
       - name: 打包 exe（onedir 模式）
-        run: pyinstaller --onedir --console --noconfirm --name 壳牌订单调度工具 --collect-all selenium run_all.py
+        run: |
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          pyinstaller --onedir --console --name 壳牌订单调度工具 --collect-all selenium run_all.py
 
       - name: 打包为 zip
-        run: Compress-Archive -Path dist\壳牌订单调度工具\* -DestinationPath dist\壳牌订单调度工具.zip
+        run: Compress-Archive -Path dist\壳牌订单调度工具 -DestinationPath dist\壳牌订单调度工具.zip
 
       - name: 上传 zip
         uses: actions/upload-artifact@v4
