@@ -25,7 +25,18 @@ jobs:
 
       - name: 打包 exe
         run: |
-          pyinstaller --onefile --console --name 壳牌订单调度工具 run_all.py
+          pyinstaller --onefile --console --name 壳牌订单调度工具 `
+            --hidden-import selenium `
+            --hidden-import selenium.webdriver.chrome `
+            --hidden-import selenium.webdriver.common.by `
+            --hidden-import selenium.common.exceptions `
+            --hidden-import spnego `
+            --hidden-import openpyxl `
+            --hidden-import pandas `
+            --hidden-import xlrd `
+            --hidden-import email.header `
+            --hidden-import base64 `
+            run_all.py
 
       - name: 上传 exe
         uses: actions/upload-artifact@v4
