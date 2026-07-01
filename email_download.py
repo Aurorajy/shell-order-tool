@@ -7,10 +7,14 @@ import email
 from email.header import decode_header
 import os
 import re
+import sys
 import glob
 from datetime import datetime, timedelta
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    SCRIPT_DIR = os.path.dirname(sys.executable)
+else:
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _load_env():
