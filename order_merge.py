@@ -37,16 +37,36 @@ if getattr(sys, 'frozen', False):
 else:
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# 承运商 → 省份映射
-CARRIER_MAP = {
-    "奥联":   ["黑龙江", "吉林"],
-    "富力达": ["河北", "辽宁"],
-    "汇利":   ["内蒙古", "新疆", "青海", "河南", "山西", "西藏"],
-    "联众":   ["山东"],
-    "津京通达": ["天津"],
-    "金博通": ["海南", "重庆", "四川", "江西", "福建", "安徽", "湖南", "湖北",
-               "广东", "贵州", "云南", "广西", "浙江", "上海", "江苏"],
-}
+# 承运商 → 省份映射（可通过 .env 覆盖）
+def _parse_carrier_config():
+    """从 .env 环境变量解析承运商配置，解析失败则用内置默认值"""
+    carriers_str = os.environ.get("CARRIER_LIST", "")
+    if carriers_str:
+        carrier_map = {}
+        for name in carriers_str.split("|"):
+            name = name.strip()
+            if not name:
+                continue
+            provinces_str = os.environ.get(f"CARRIER_{name}_省", "")
+            if provinces_str:
+                carrier_map[name] = [p.strip() for p in provinces_str.split(",") if p.strip()]
+            else:
+                carrier_map[name] = []
+        if carrier_map:
+            return carrier_map
+
+    # 内置默认值
+    return {
+        "奥联":   ["黑龙江", "吉林"],
+        "富力达": ["河北", "辽宁"],
+        "汇利":   ["内蒙古", "新疆", "青海", "河南", "山西", "西藏"],
+        "联众":   ["山东"],
+        "津京通达": ["天津"],
+        "金博通": ["海南", "重庆", "四川", "江西", "福建", "安徽", "湖南", "湖北",
+                   "广东", "贵州", "云南", "广西", "浙江", "上海", "江苏"],
+    }
+
+CARRIER_MAP = _parse_carrier_config()
 
 # ============================================================
 # 从 .env 加载配置
@@ -76,35 +96,56 @@ EMAIL_CONFIG = {
     "timeout": 30,
 }
 
-# 承运商 → 收件邮箱（多个用分号分隔）
-CARRIER_EMAILS = {
-    "奥联":   ";".join([
-        "shikun.0101@163.com", "chenjibing@sinotrans.com",
-        "yn416@163.com", "shelldispatchtj@sinotrans.com", "15620067562@163.com"
-    ]),
-    "富力达": ";".join([
-        "jinxu_yang@163.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
-    ]),
-    "汇利":   ";".join([
-        "13821789358@163.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
-    ]),
-    "联众":   ";".join([
-        "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com", "lixuekuan@cmhk.com"
-    ]),
-    "津京通达": ";".join([
-        "shelldispatchtj@sinotrans.com", "zhengdongdong_Jl@163.com"
-    ]),
-    "金博通": ";".join([
-        "tjybwlgs@126.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
-    ]),
-}
+# 承运商 → 收件邮箱（可通过 .env 覆盖，多个用分号分隔）
+def _parse_carrier_emails():
+    """从 .env 读取承运商邮箱，失败则用内置默认值"""
+    carriers_str = os.environ.get("CARRIER_LIST", "")
+    if carriers_str:
+        carrier_emails = {}
+        for name in carriers_str.split("|"):
+            name = name.strip()
+            if not name:
+                continue
+            emails_str = os.environ.get(f"CARRIER_{name}_邮箱", "")
+            if emails_str:
+                carrier_emails[name] = emails_str
+            else:
+                carrier_emails[name] = ""
+        if any(v for v in carrier_emails.values()):
+            return carrier_emails
 
-# 调度总表收件人 + 未匹配承运商收件人
-MASTER_RECIPIENTS = ";".join([
-    "shelldispatchtj@sinotrans.com", "caimeng1@cmhk.com",
-    "lixuekuan@cmhk.com", "liushuo2@cmhk.com"
-])
-UNMATCHED_RECIPIENT = "shelldispatchtj@sinotrans.com"
+    # 内置默认值
+    return {
+        "奥联":   ";".join([
+            "shikun.0101@163.com", "chenjibing@sinotrans.com",
+            "yn416@163.com", "shelldispatchtj@sinotrans.com", "15620067562@163.com"
+        ]),
+        "富力达": ";".join([
+            "jinxu_yang@163.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
+        ]),
+        "汇利":   ";".join([
+            "13821789358@163.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
+        ]),
+        "联众":   ";".join([
+            "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com", "lixuekuan@cmhk.com"
+        ]),
+        "津京通达": ";".join([
+            "shelldispatchtj@sinotrans.com", "zhengdongdong_Jl@163.com"
+        ]),
+        "金博通": ";".join([
+            "tjybwlgs@126.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
+        ]),
+    }
+
+CARRIER_EMAILS = _parse_carrier_emails()
+
+# 调度总表收件人 + 未匹配承运商收件人（可通过 .env 覆盖）
+MASTER_RECIPIENTS = os.environ.get(
+    "MASTER_RECIPIENTS",
+    ";".join(["shelldispatchtj@sinotrans.com", "caimeng1@cmhk.com",
+              "lixuekuan@cmhk.com", "liushuo2@cmhk.com"])
+)
+UNMATCHED_RECIPIENT = os.environ.get("UNMATCHED_RECIPIENT", "shelldispatchtj@sinotrans.com")
 
 # 表1（SDCC 导出）列索引（0-based）
 T1_ORDER_NO      = 1    # B列 - 单号
