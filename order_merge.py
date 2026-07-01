@@ -19,6 +19,13 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 import pandas as pd
+from base64 import b64encode, b64decode
+
+try:
+    import spnego
+    HAVE_SPNEGO = True
+except ImportError:
+    HAVE_SPNEGO = False
 
 # ============================================================
 # 配置区
@@ -62,22 +69,42 @@ _load_env()
 # 邮件配置
 # ============================================================
 EMAIL_CONFIG = {
-    "smtp_server": "smtp.qq.com",
-    "smtp_port": 587,              # 465 SSL / 587 STARTTLS
-    "sender": os.environ["QQ_EMAIL"],
-    "auth_code": os.environ["QQ_AUTH_CODE"],
+    "smtp_server": os.environ.get("EMAIL_SMTP_SERVER", "owa.sinotrans.com"),
+    "smtp_port": int(os.environ.get("EMAIL_SMTP_PORT", "587")),
+    "sender": os.environ["EMAIL_SENDER"],
+    "auth_code": os.environ["EMAIL_PASSWORD"],
     "timeout": 30,
 }
 
-# 承运商 → 收件邮箱（待补充完整）
+# 承运商 → 收件邮箱（多个用分号分隔）
 CARRIER_EMAILS = {
-    "奥联":   "",                                  # TODO
-    "富力达": "auroraqjy@163.com",
-    "汇利":   "",                                  # TODO
-    "联众":   "",                                  # TODO
-    "津京通达": "",                                 # TODO
-    "金博通": "",                                   # TODO
+    "奥联":   ";".join([
+        "shikun.0101@163.com", "chenjibing@sinotrans.com",
+        "yn416@163.com", "shelldispatchtj@sinotrans.com", "15620067562@163.com"
+    ]),
+    "富力达": ";".join([
+        "jinxu_yang@163.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
+    ]),
+    "汇利":   ";".join([
+        "13821789358@163.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
+    ]),
+    "联众":   ";".join([
+        "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com", "lixuekuan@cmhk.com"
+    ]),
+    "津京通达": ";".join([
+        "shelldispatchtj@sinotrans.com", "zhengdongdong_Jl@163.com"
+    ]),
+    "金博通": ";".join([
+        "tjybwlgs@126.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
+    ]),
 }
+
+# 调度总表收件人 + 未匹配承运商收件人
+MASTER_RECIPIENTS = ";".join([
+    "shelldispatchtj@sinotrans.com", "caimeng1@cmhk.com",
+    "lixuekuan@cmhk.com", "liushuo2@cmhk.com"
+])
+UNMATCHED_RECIPIENT = "shelldispatchtj@sinotrans.com"
 
 # 表1（SDCC 导出）列索引（0-based）
 T1_ORDER_NO      = 1    # B列 - 单号
@@ -253,12 +280,34 @@ def get_output_subdir(base_dir, date_tuple):
 # 邮件发送
 # ============================================================
 
-def send_email(receiver, subject, body, attachment_path):
-    """发送单封带附件的邮件。成功返回 True"""
+def _ntlm_login(conn, username, password):
+    """NTLM 认证（Exchange 服务器需要）"""
+    conn.ehlo("test")
+    auth = spnego.client(username, password,
+                         hostname=conn.sock.getpeername()[0],
+                         service="SMTP", protocol="ntlm")
+    code, _ = conn.docmd("AUTH", "NTLM")
+    if code != 334:
+        raise Exception(f"AUTH NTLM 失败: {code}")
+    out_token = auth.step(None)
+    code, resp = conn.docmd(b64encode(out_token).decode())
+    if code != 334:
+        raise Exception(f"NTLM Type1 失败: {code}")
+    challenge = b64decode(resp.decode().strip())
+    out_token = auth.step(challenge)
+    code, _ = conn.docmd(b64encode(out_token).decode())
+    if code != 235:
+        raise Exception(f"NTLM Type3 失败: {code}")
+
+
+def send_email(receivers, subject, body, attachment_path):
+    """发送带附件的邮件，receivers 为分号分隔的邮箱字符串。成功返回 True"""
     config = EMAIL_CONFIG
+    to_list = [r.strip() for r in receivers.split(";") if r.strip()]
+
     msg = MIMEMultipart()
     msg["From"] = config["sender"]
-    msg["To"] = receiver
+    msg["To"] = receivers
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
@@ -270,22 +319,43 @@ def send_email(receiver, subject, body, attachment_path):
                     filename=os.path.basename(attachment_path))
     msg.attach(part)
 
-    for port in [config["smtp_port"], 465, 587]:
-        use_ssl = (port == 465)
-        try:
-            if use_ssl:
-                server = smtplib.SMTP_SSL(config["smtp_server"], port,
+    def _try_standard():
+        for port in [config["smtp_port"], 465, 587]:
+            use_ssl = (port == 465)
+            try:
+                if use_ssl:
+                    server = smtplib.SMTP_SSL(config["smtp_server"], port,
+                                              timeout=config["timeout"])
+                else:
+                    server = smtplib.SMTP(config["smtp_server"], port,
                                           timeout=config["timeout"])
-            else:
-                server = smtplib.SMTP(config["smtp_server"], port,
-                                      timeout=config["timeout"])
-                server.starttls()
-            server.login(config["sender"], config["auth_code"])
-            server.sendmail(config["sender"], [receiver], msg.as_string())
+                    server.starttls()
+                server.login(config["sender"], config["auth_code"])
+                server.sendmail(config["sender"], to_list, msg.as_string())
+                server.quit()
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _try_ntlm():
+        if not HAVE_SPNEGO:
+            return False
+        try:
+            server = smtplib.SMTP(config["smtp_server"], config["smtp_port"],
+                                  timeout=config["timeout"])
+            _ntlm_login(server, os.environ.get("EMAIL_USERNAME", config["sender"]),
+                        config["auth_code"])
+            server.sendmail(config["sender"], to_list, msg.as_string())
             server.quit()
             return True
         except Exception:
-            continue
+            return False
+
+    if _try_standard():
+        return True
+    if _try_ntlm():
+        return True
     return False
 
 
@@ -294,17 +364,40 @@ def send_email(receiver, subject, body, attachment_path):
 # ============================================================
 
 def find_files(directory):
-    """扫描目录，识别 SDCC 文件和客户文件"""
-    all_xlsx = [f for f in os.listdir(directory)
-                if f.endswith(('.xlsx', '.xls'))
-                and not f.startswith(('~$', '.~'))]
+    """扫描目录（含 data/ 子目录），识别 SDCC 文件和客户文件。
+    优先使用 data/ 子目录下最新的文件。"""
+    all_xlsx = []
+
+    # 1. 扫描主目录
+    for f in os.listdir(directory):
+        if f.endswith(('.xlsx', '.xls')) and not f.startswith(('~$', '.~')):
+            all_xlsx.append(os.path.join(directory, f))
+
+    # 2. 扫描 data/ 子目录（仅最近 7 天）
+    data_dir = os.path.join(directory, "data")
+    cutoff = datetime.now() - timedelta(days=7)
+    if os.path.isdir(data_dir):
+        for sub in sorted(os.listdir(data_dir), reverse=True):
+            sub_path = os.path.join(data_dir, sub)
+            if os.path.isdir(sub_path):
+                # 子目录名为 YYYYMMDD 格式时，检查是否在 7 天内
+                m = re.match(r'^(\d{4})(\d{2})(\d{2})$', sub)
+                if m:
+                    sub_date = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                    if sub_date < cutoff:
+                        continue
+                for f in os.listdir(sub_path):
+                    if f.endswith(('.xlsx', '.xls')) and not f.startswith(('~$', '.~')):
+                        all_xlsx.append(os.path.join(sub_path, f))
 
     sdcc_file = None
     customer_files = []
 
     for f in all_xlsx:
-        if re.match(r'download_?\d{4}[-_]?\d{2}[-_]?\d{2}', f, re.IGNORECASE):
-            sdcc_file = f
+        basename = os.path.basename(f)
+        if re.match(r'download_?\d{4}[-_]?\d{2}[-_]?\d{2}', basename, re.IGNORECASE):
+            if sdcc_file is None or os.path.getmtime(f) > os.path.getmtime(sdcc_file):
+                sdcc_file = f
         else:
             customer_files.append(f)
 
@@ -542,29 +635,57 @@ def auto_fit_columns(filepath):
 
 
 def write_and_send(master, output_dir):
-    """写入总表和各承运商分表，并发送邮件"""
+    """写入总表和各承运商分表，并发送邮件。
+    设置环境变量 DRY_RUN=1 可跳过发邮件，仅生成 Excel。"""
+    dry_run = os.environ.get("DRY_RUN", "") == "1"
     os.makedirs(output_dir, exist_ok=True)
     date_str = os.path.basename(output_dir.rstrip('/').rstrip('\\'))
+    subject = f"壳牌订单调度表_{date_str}"
+    body = "请查收今日订单，附件为贵司配送明细。"
 
-    # 调度总表
+    no_carrier = master[master['承运商'].isna() | (master['承运商'] == '')]
+
+    # --- 调度总表（仅「全部订单」sheet）---
     master_path = os.path.join(output_dir, '调度总表.xlsx')
     with pd.ExcelWriter(master_path, engine='openpyxl') as writer:
         master.to_excel(writer, sheet_name='全部订单', index=False)
-        no_carrier = master[master['承运商'].isna() | (master['承运商'] == '')]
-        if len(no_carrier) > 0:
-            no_carrier.to_excel(writer, sheet_name='未匹配承运商', index=False)
     auto_fit_columns(master_path)
 
     print(f"\n✓ 总表: {master_path}")
     print(f"  总行数: {len(master)}")
-    no_carrier_count = master['承运商'].isna().sum() + (master['承运商'] == '').sum()
-    if no_carrier_count > 0:
-        unassigned = master[(master['承运商'].isna()) | (master['承运商'] == '')]
-        provinces = unassigned['目的地（省）'].dropna().unique()
-        print(f"  ⚠ 未匹配承运商: {no_carrier_count} 行 (省份: {list(provinces)}) → 见「未匹配承运商」sheet")
 
-    # 各承运商分表
-    print("\n📧 发送邮件...")
+    # 发送总表
+    if dry_run:
+        print(f"  [DRY RUN] 跳过发送总表 → {MASTER_RECIPIENTS}")
+    else:
+        print(f"  发送总表 → {MASTER_RECIPIENTS}", end="")
+        if send_email(MASTER_RECIPIENTS, subject, body, master_path):
+            print(" ✅")
+        else:
+            print(" ❌ 发送失败！")
+
+    # --- 未匹配承运商（单独文件）---
+    if len(no_carrier) > 0:
+        unmatched_path = os.path.join(output_dir, '未匹配承运商.xlsx')
+        no_carrier.to_excel(unmatched_path, index=False)
+        auto_fit_columns(unmatched_path)
+        provinces = no_carrier['目的地（省）'].dropna().unique()
+        print(f"  ⚠ 未匹配承运商: {len(no_carrier)} 行 (省份: {list(provinces)}) → {os.path.basename(unmatched_path)}")
+
+        if dry_run:
+            print(f"  [DRY RUN] 跳过发送未匹配表 → {UNMATCHED_RECIPIENT}")
+        else:
+            print(f"  发送未匹配表 → {UNMATCHED_RECIPIENT}", end="")
+            if send_email(UNMATCHED_RECIPIENT, subject + "_未匹配", body, unmatched_path):
+                print(" ✅")
+            else:
+                print(" ❌ 发送失败！")
+
+    # --- 各承运商分表 ---
+    if dry_run:
+        print("\n📁 生成承运商分表（跳过发邮件）...")
+    else:
+        print("\n📧 发送承运商邮件...")
     for carrier in CARRIER_MAP:
         subset = master[master['承运商'] == carrier]
         if len(subset) == 0:
@@ -572,20 +693,20 @@ def write_and_send(master, output_dir):
         path = os.path.join(output_dir, f'{carrier}.xlsx')
         subset.to_excel(path, index=False)
         auto_fit_columns(path)
-        print(f"  {carrier}: {len(subset)} 行 → {carrier}.xlsx", end="")
 
-        # 发送邮件
-        receiver = CARRIER_EMAILS.get(carrier, "")
-        if not receiver:
-            print(" (未配置邮箱，跳过发送)")
+        receivers = CARRIER_EMAILS.get(carrier, "")
+        if not receivers:
+            print(f"  {carrier}: {len(subset)} 行 (未配置邮箱，跳过)")
             continue
 
-        subject = f"壳牌订单调度表_{date_str}"
-        body = "请查收今日订单，附件为贵司配送明细。"
-        if send_email(receiver, subject, body, path):
-            print(f" → 已发送至 {receiver}")
+        if dry_run:
+            print(f"  {carrier}: {len(subset)} 行 → {receivers} [跳过]")
         else:
-            print(f" → 发送失败！({receiver})")
+            print(f"  {carrier}: {len(subset)} 行 → {receivers}", end="")
+            if send_email(receivers, subject, body, path):
+                print(" ✅")
+            else:
+                print(" ❌ 发送失败！")
 
     print("")
 
@@ -613,7 +734,7 @@ def main():
 
     # 读取 SDCC
     print("\n📖 读取 SDCC 文件...")
-    sdcc_df, sdcc_raw = read_sdcc(os.path.join(SCRIPT_DIR, sdcc_file))
+    sdcc_df, sdcc_raw = read_sdcc(sdcc_file)
     print(f"   SDCC: {len(sdcc_df)} 行, {sdcc_df['order_no'].nunique()} 个单号")
 
     # 提取 SDCC 日期（BT列，精确到天）
@@ -638,8 +759,7 @@ def main():
         fn_date = extract_filename_date(f)
         print(f"   文件 {f}: 文件名日期={date_to_str(fn_date) if fn_date else '无'}")
 
-        sheets = read_customer(
-            os.path.join(SCRIPT_DIR, f),
+        sheets = read_customer(f,
             target_date=customer_target_date,
             filename_date=fn_date
         )
@@ -657,8 +777,8 @@ def main():
     matched = (master['GKA'].notna() & (master['GKA'] != '')).sum()
     print(f"   匹配成功: {matched} / {len(master)} 行")
 
-    # 输出目录
-    date_for_output = sdcc_date
+    # 输出目录使用客户发货计划日期（SDCC+1），而非 SDCC 日期
+    date_for_output = customer_target_date or sdcc_date
     if not date_for_output:
         for f in customer_files:
             d = extract_filename_date(f)

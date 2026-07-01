@@ -22,3 +22,6 @@ page_source.html
 
 # 敏感信息
 .env
+
+# 下载的数据文件
+data/

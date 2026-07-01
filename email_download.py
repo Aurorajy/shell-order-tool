@@ -7,7 +7,8 @@ import email
 from email.header import decode_header
 import os
 import re
-from datetime import datetime
+import glob
+from datetime import datetime, timedelta
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -27,20 +28,31 @@ def _load_env():
 
 _load_env()
 
-IMAP_SERVER = "imap.qq.com"
-IMAP_PORT = 993
-USERNAME = os.environ["QQ_EMAIL"]
-AUTH_CODE = os.environ["QQ_AUTH_CODE"]
+IMAP_SERVER = os.environ.get("EMAIL_IMAP_SERVER", "imap.qq.com")
+IMAP_PORT = int(os.environ.get("EMAIL_IMAP_PORT", "993"))
+USERNAME = os.environ["EMAIL_USERNAME"]
+AUTH_CODE = os.environ["EMAIL_PASSWORD"]
 
 
 def download_customer_attachment(date_override=None):
     """
     下载今天（或指定日期）的客户发货计划附件。
-    返回下载的文件路径，失败返回 None。
+    保存到 data/YYYYMMDD/ 目录，返回下载的文件路径，失败返回 None。
     """
     today = date_override or datetime.now()
-    date_str = f"{today.year}/{today.month}/{today.day}"
-    date_str2 = f"{today.year}/{today.month:02d}/{today.day:02d}"
+    target = today + timedelta(days=1)  # 客户提前一天发次日的发货计划
+    date_str = f"{target.year}/{target.month}/{target.day}"
+    date_str2 = f"{target.year}/{target.month:02d}/{target.day:02d}"
+    date_dir = os.path.join(SCRIPT_DIR, "data", today.strftime("%Y%m%d"))
+    os.makedirs(date_dir, exist_ok=True)
+
+    # 今天已经下载过了，直接返回已有文件
+    existing = glob.glob(os.path.join(date_dir, "*.xlsx")) + glob.glob(os.path.join(date_dir, "*.xls"))
+    existing = [f for f in existing if not os.path.basename(f).startswith(("~$", ".~", "download_"))]
+    if existing:
+        latest = max(existing, key=os.path.getmtime)
+        print(f"✅ 今天已有附件: {os.path.basename(latest)}")
+        return latest
 
     print(f"连接 {IMAP_SERVER}:{IMAP_PORT} ...")
     mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
@@ -89,7 +101,7 @@ def download_customer_attachment(date_override=None):
                 if isinstance(fname, bytes):
                     fname = fname.decode(enc or "utf-8", errors="replace")
                 if fname.lower().endswith((".xlsx", ".xls")):
-                    save_path = os.path.join(SCRIPT_DIR, fname)
+                    save_path = os.path.join(date_dir, fname)
                     with open(save_path, "wb") as f:
                         f.write(part.get_payload(decode=True))
                     downloaded = save_path
