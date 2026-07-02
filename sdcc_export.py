@@ -160,13 +160,14 @@ def run_sdcc_export(sdcc_date_str=None):
 			if is_on_main_page():
 				print("  登录成功！")
 			else:
-				print("  ⚠ 可能未登录成功，请检查后按 Enter 继续...")
-				input()
+				print("  ❌ 登录失败，可能是密码错误或需要验证码")
+				driver.quit()
+				return None
 		except NoSuchElementException:
 			driver.switch_to.default_content()
-			print("  ⚠ 未找到登录表单，请手动登录后按 Enter 继续...")
-			input()
-			close_popups()
+			print("  ❌ 未找到登录表单")
+			driver.quit()
+			return None
 
 	print("  登录阶段完成！")
 	print("=" * 60)
@@ -223,8 +224,9 @@ def run_sdcc_export(sdcc_date_str=None):
 		option.click()
 		print(f"  选中: {PROJECT_NAME}")
 	except NoSuchElementException:
-		print("  ⚠ 未弹出下拉选项，请手动点击下拉项后按 Enter")
-		input()
+		print("  ❌ 未弹出下拉选项")
+		driver.quit()
+		return None
 
 	# [4/5] 设置日期范围 + 搜索
 	print("\n[4/5] 设置日期并搜索...")
@@ -325,8 +327,9 @@ def run_sdcc_export(sdcc_date_str=None):
 			search_btn.click()
 			print("  已点击「搜索」")
 		except NoSuchElementException:
-			print("  ⚠ 未找到搜索按钮，请手动点击后按 Enter")
-			input()
+			print("  ❌ 未找到搜索按钮")
+			driver.quit()
+			return None
 
 	time.sleep(5)
 
