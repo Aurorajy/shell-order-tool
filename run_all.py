@@ -10,6 +10,7 @@ import sys
 import os
 import re
 import glob
+import shutil
 from datetime import datetime, timedelta
 
 # 兼容 exe 打包
@@ -89,6 +90,13 @@ if __name__ == "__main__":
 	print("=" * 60)
 	print("  壳牌订单调度 - 全流程自动化")
 	print("=" * 60)
+
+	# 清理昨天的 output
+	yesterday = datetime.now() - timedelta(days=1)
+	yesterday_dir = os.path.join(SCRIPT_DIR, "output", yesterday.strftime("%Y%m%d"))
+	if os.path.exists(yesterday_dir):
+		shutil.rmtree(yesterday_dir)
+		print(f"🧹 已清理昨日输出: {yesterday.strftime('%Y%m%d')}")
 
 	# 检查今天是否已完成
 	today_str = datetime.now().strftime("%Y%m%d")
