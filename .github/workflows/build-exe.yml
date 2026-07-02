@@ -23,13 +23,15 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: 验证 selenium 已安装
-        run: python -c "import selenium; print('selenium version:', selenium.__version__)"
+      - name: 验证依赖
+        run: |
+          python -c "import selenium; print('selenium:', selenium.__version__)"
+          python -c "import spnego; print('spnego ok')"
 
       - name: 打包 exe（onedir 模式）
         run: |
           Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
-          pyinstaller --onedir --console --name 壳牌订单调度工具 --collect-all selenium run_all.py
+          pyinstaller --onedir --console --name 壳牌订单调度工具 --collect-all selenium --collect-all spnego run_all.py
 
       - name: 打包为 zip
         run: Compress-Archive -Path dist\壳牌订单调度工具 -DestinationPath dist\壳牌订单调度工具.zip
