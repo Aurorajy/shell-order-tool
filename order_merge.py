@@ -322,23 +322,23 @@ def get_output_subdir(base_dir, date_tuple):
 # ============================================================
 
 def _ntlm_login(conn, username, password):
-    """NTLM 认证（Exchange 服务器需要）"""
+    """NTLM 认证"""
     conn.ehlo("test")
     auth = spnego.client(username, password,
                          hostname=conn.sock.getpeername()[0],
                          service="SMTP", protocol="ntlm")
     code, _ = conn.docmd("AUTH", "NTLM")
     if code != 334:
-        raise Exception(f"AUTH NTLM 失败: {code}")
+        raise Exception(f"AUTH NTLM: {code}")
     out_token = auth.step(None)
     code, resp = conn.docmd(b64encode(out_token).decode())
     if code != 334:
-        raise Exception(f"NTLM Type1 失败: {code}")
+        raise Exception(f"Type1: {code}")
     challenge = b64decode(resp.decode().strip())
     out_token = auth.step(challenge)
     code, _ = conn.docmd(b64encode(out_token).decode())
     if code != 235:
-        raise Exception(f"NTLM Type3 失败: {code}")
+        raise Exception(f"Type3: {code}")
 
 
 def send_email(receivers, subject, body, attachment_path):
@@ -401,17 +401,35 @@ def send_email(receivers, subject, body, attachment_path):
     def _try_ntlm():
         if not HAVE_SPNEGO:
             return False, "spnego 未安装"
-        try:
-            print("    [NTLM]", end="", flush=True)
-            server = smtplib.SMTP(config["smtp_server"], config["smtp_port"],
-                                  timeout=config["timeout"])
-            _ntlm_login(server, os.environ.get("EMAIL_USERNAME", config["sender"]),
-                        config["auth_code"])
-            server.sendmail(config["sender"], to_list, msg.as_string())
-            server.quit()
-            return True, ""
-        except Exception as e:
-            return False, str(e)
+        username = os.environ.get("EMAIL_USERNAME", config["sender"])
+        # 尝试多种用户名格式
+        candidates = [username]
+        if "@" in username:
+            candidates.append(username.split("@")[0])
+        else:
+            sender = os.environ.get("EMAIL_SENDER", "")
+            if "@" in sender:
+                domain = sender.split("@")[1]
+                candidates.append(f"{username}@{domain}")
+                parts = domain.split(".")
+                if parts:
+                    candidates.append(f"{parts[0]}\\{username}")
+
+        last_err = ""
+        for user in candidates:
+            try:
+                print(f"    [NTLM:{user}]", end="", flush=True)
+                server = smtplib.SMTP(config["smtp_server"], config["smtp_port"],
+                                      timeout=config["timeout"])
+                _ntlm_login(server, user, config["auth_code"])
+                server.sendmail(config["sender"], to_list, msg.as_string())
+                server.quit()
+                return True, ""
+            except Exception as e:
+                last_err = str(e)
+                try: server.quit()
+                except: pass
+        return False, last_err
 
     errors = []
     for fn in [_try_plain, _try_starttls, _try_ssl, _try_ntlm]:
