@@ -361,22 +361,40 @@ def send_email(receivers, subject, body, attachment_path):
     msg.attach(part)
 
     def _try_standard():
-        for port in [config["smtp_port"], 465, 587]:
-            use_ssl = (port == 465)
-            try:
-                if use_ssl:
-                    server = smtplib.SMTP_SSL(config["smtp_server"], port,
-                                              timeout=config["timeout"])
-                else:
-                    server = smtplib.SMTP(config["smtp_server"], port,
-                                          timeout=config["timeout"])
-                    server.starttls()
-                server.login(config["sender"], config["auth_code"])
-                server.sendmail(config["sender"], to_list, msg.as_string())
-                server.quit()
-                return True
-            except Exception:
-                continue
+        # 1) 明文 SMTP（内网通常不需要 TLS，兼容 Windows Server 2012 R2）
+        try:
+            server = smtplib.SMTP(config["smtp_server"], config["smtp_port"],
+                                  timeout=config["timeout"])
+            server.login(config["sender"], config["auth_code"])
+            server.sendmail(config["sender"], to_list, msg.as_string())
+            server.quit()
+            return True
+        except Exception:
+            pass
+
+        # 2) SMTP + STARTTLS
+        try:
+            server = smtplib.SMTP(config["smtp_server"], config["smtp_port"],
+                                  timeout=config["timeout"])
+            server.starttls()
+            server.login(config["sender"], config["auth_code"])
+            server.sendmail(config["sender"], to_list, msg.as_string())
+            server.quit()
+            return True
+        except Exception:
+            pass
+
+        # 3) SMTP_SSL (port 465)
+        try:
+            server = smtplib.SMTP_SSL(config["smtp_server"], 465,
+                                      timeout=config["timeout"])
+            server.login(config["sender"], config["auth_code"])
+            server.sendmail(config["sender"], to_list, msg.as_string())
+            server.quit()
+            return True
+        except Exception:
+            pass
+
         return False
 
     def _try_ntlm():
