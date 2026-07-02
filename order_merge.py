@@ -360,61 +360,71 @@ def send_email(receivers, subject, body, attachment_path):
                     filename=os.path.basename(attachment_path))
     msg.attach(part)
 
-    def _try_standard():
-        # 1) 明文 SMTP（内网通常不需要 TLS，兼容 Windows Server 2012 R2）
+    def _try_plain():
         try:
+            print("    [明文SMTP]", end="", flush=True)
             server = smtplib.SMTP(config["smtp_server"], config["smtp_port"],
                                   timeout=config["timeout"])
+            server.set_debuglevel(False)
             server.login(config["sender"], config["auth_code"])
             server.sendmail(config["sender"], to_list, msg.as_string())
             server.quit()
-            return True
-        except Exception:
-            pass
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
-        # 2) SMTP + STARTTLS
+    def _try_starttls():
         try:
+            print("    [STARTTLS]", end="", flush=True)
             server = smtplib.SMTP(config["smtp_server"], config["smtp_port"],
                                   timeout=config["timeout"])
             server.starttls()
             server.login(config["sender"], config["auth_code"])
             server.sendmail(config["sender"], to_list, msg.as_string())
             server.quit()
-            return True
-        except Exception:
-            pass
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
-        # 3) SMTP_SSL (port 465)
+    def _try_ssl():
         try:
+            print("    [SSL:465]", end="", flush=True)
             server = smtplib.SMTP_SSL(config["smtp_server"], 465,
                                       timeout=config["timeout"])
             server.login(config["sender"], config["auth_code"])
             server.sendmail(config["sender"], to_list, msg.as_string())
             server.quit()
-            return True
-        except Exception:
-            pass
-
-        return False
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
     def _try_ntlm():
         if not HAVE_SPNEGO:
-            return False
+            return False, "spnego 未安装"
         try:
+            print("    [NTLM]", end="", flush=True)
             server = smtplib.SMTP(config["smtp_server"], config["smtp_port"],
                                   timeout=config["timeout"])
             _ntlm_login(server, os.environ.get("EMAIL_USERNAME", config["sender"]),
                         config["auth_code"])
             server.sendmail(config["sender"], to_list, msg.as_string())
             server.quit()
-            return True
-        except Exception:
-            return False
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
-    if _try_standard():
-        return True
-    if _try_ntlm():
-        return True
+    errors = []
+    for fn in [_try_plain, _try_starttls, _try_ssl, _try_ntlm]:
+        ok, err = fn()
+        if ok:
+            return True
+        if err:
+            errors.append(err)
+            print(f" 失败: {err[:120]}")
+        else:
+            print(" 跳过")
+
+    print(f"    ❌ 全部方式失败: {'; '.join(errors)}")
     return False
 
 
