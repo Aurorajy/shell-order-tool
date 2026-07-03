@@ -98,12 +98,16 @@ if __name__ == "__main__":
 		shutil.rmtree(yesterday_dir)
 		print(f"🧹 已清理昨日输出: {yesterday.strftime('%Y%m%d')}")
 
-	# 检查今天是否已完成
+	# 检查今天是否已完成（输出目录用客户目标日期=SDCC+1，可能>今天）
 	today_str = datetime.now().strftime("%Y%m%d")
-	today_output = os.path.join(SCRIPT_DIR, "output", today_str)
-	if os.path.exists(os.path.join(today_output, "调度总表.xlsx")):
-		print(f"\n✅ 今天({today_str})已完成，无需重复执行。")
-		sys.exit(0)
+	output_base = os.path.join(SCRIPT_DIR, "output")
+	if os.path.isdir(output_base):
+		for d in os.listdir(output_base):
+			m = re.match(r'^(\d{8})', d)
+			if m and m.group(1) >= today_str:
+				if os.path.exists(os.path.join(output_base, d, "调度总表.xlsx")):
+					print(f"\n✅ 今天已完成（{d}/调度总表.xlsx 已存在），无需重复执行。")
+					sys.exit(0)
 
 	# Step 1: 下载客户邮件附件
 	print("\n" + "=" * 60)
