@@ -91,23 +91,18 @@ if __name__ == "__main__":
 	print("  壳牌订单调度 - 全流程自动化")
 	print("=" * 60)
 
-	# 清理昨天的 output
-	yesterday = datetime.now() - timedelta(days=1)
-	yesterday_dir = os.path.join(SCRIPT_DIR, "output", yesterday.strftime("%Y%m%d"))
-	if os.path.exists(yesterday_dir):
-		shutil.rmtree(yesterday_dir)
-		print(f"🧹 已清理昨日输出: {yesterday.strftime('%Y%m%d')}")
-
-	# 检查今天是否已完成（输出目录用客户目标日期=SDCC+1，可能>今天）
-	today_str = datetime.now().strftime("%Y%m%d")
+	today = datetime.now()
+	today_str = today.strftime("%Y%m%d")
 	output_base = os.path.join(SCRIPT_DIR, "output")
+
+	# 清理所有 < 今天的旧 output 目录
 	if os.path.isdir(output_base):
 		for d in os.listdir(output_base):
 			m = re.match(r'^(\d{8})', d)
-			if m and m.group(1) >= today_str:
-				if os.path.exists(os.path.join(output_base, d, "调度总表.xlsx")):
-					print(f"\n✅ 今天已完成（{d}/调度总表.xlsx 已存在），无需重复执行。")
-					sys.exit(0)
+			if m and m.group(1) < today_str:
+				p = os.path.join(output_base, d)
+				shutil.rmtree(p)
+				print(f"🧹 已清理旧输出: {d}")
 
 	# Step 1: 下载客户邮件附件
 	print("\n" + "=" * 60)
@@ -118,12 +113,13 @@ if __name__ == "__main__":
 		print("\n❌ 今天未收到新的客户发货计划邮件，流程终止。")
 		sys.exit(0)
 
-	# Step 2: 推算 SDCC 导出日期
+	# Step 2: 推算 SDCC 导出日期 + 确定客户目标日期
 	print("\n" + "=" * 60)
 	print("  Step 2/4: 推算 SDCC 导出日期")
 	print("=" * 60)
 	customer_file = find_customer_file()
 	sdcc_date_str = None
+	customer_target_str = None
 	if customer_file:
 		print(f"客户文件: {os.path.basename(customer_file)}")
 		md = get_latest_subtable_date(customer_file)
@@ -131,10 +127,24 @@ if __name__ == "__main__":
 			sdcc_date_str = calc_sdcc_date(md[0], md[1])
 			os.environ["SDCC_DATE"] = sdcc_date_str
 			print(f"SDCC 导出日期（子表-1天）: {sdcc_date_str}")
+
+			# 客户目标日期 = 子表日期（即 SDCC 日期 + 1 天）
+			sub_date = datetime(today.year, md[0], md[1])
+			if sub_date > today + timedelta(days=60):
+				sub_date = datetime(today.year - 1, md[0], md[1])
+			customer_target_str = sub_date.strftime("%Y%m%d")
+			print(f"客户目标日期（子表日期）: {customer_target_str}")
 		else:
 			print("未能提取子表日期，SDCC 将使用今天")
 	else:
 		print("未找到客户文件，SDCC 将使用今天")
+
+	# 精确检查：输出目录已存在 → 今天已完成
+	if customer_target_str:
+		target_output = os.path.join(output_base, customer_target_str)
+		if os.path.exists(os.path.join(target_output, "调度总表.xlsx")):
+			print(f"\n✅ 今天已完成（{customer_target_str}/调度总表.xlsx 已存在），无需重复执行。")
+			sys.exit(0)
 
 	# Step 3: SDCC 导出
 	print("\n" + "=" * 60)
@@ -150,6 +160,29 @@ if __name__ == "__main__":
 	print("  Step 4/4: 订单合并 + 发送邮件")
 	print("=" * 60)
 	order_merge_main()
+
+	# 清理：只保留本次生成的 output，删除其他所有旧 output
+	if os.path.isdir(output_base) and customer_target_str:
+		for d in os.listdir(output_base):
+			m = re.match(r'^(\d{8})', d)
+			if m and m.group(1) != customer_target_str:
+				p = os.path.join(output_base, d)
+				shutil.rmtree(p)
+				print(f"🧹 已清理旧输出: {d}")
+
+	# 清理 7 天前的 data/ 子目录
+	data_dir = os.path.join(SCRIPT_DIR, "data")
+	if os.path.isdir(data_dir):
+		cutoff = today - timedelta(days=7)
+		for sub in os.listdir(data_dir):
+			sub_path = os.path.join(data_dir, sub)
+			if os.path.isdir(sub_path):
+				m = re.match(r'^(\d{4})(\d{2})(\d{2})$', sub)
+				if m:
+					sub_date = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+					if sub_date < cutoff:
+						shutil.rmtree(sub_path)
+						print(f"🧹 已清理旧数据: data/{sub}")
 
 	print("\n" + "=" * 60)
 	print("  ✅ 全流程完成！")
