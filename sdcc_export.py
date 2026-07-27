@@ -79,8 +79,13 @@ def run_sdcc_export(sdcc_date_str=None):
 				print(f"✅ 今天已导出（{row_count}+ 行）: {target_file}")
 				return target_file
 		except Exception:
-			print(f"✅ 今天已导出: {target_file}")
-			return target_file
+			# 文件损坏或无法读取，按大小判断
+			if os.path.getsize(target_file) < 500:
+				print(f"  上次导出文件异常（{os.path.getsize(target_file)}字节），重新导出...")
+				os.remove(target_file)
+			else:
+				print(f"✅ 今天已导出: {target_file}")
+				return target_file
 
 	options = webdriver.ChromeOptions()
 	options.add_argument("--log-level=3")
