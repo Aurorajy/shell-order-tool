@@ -24,6 +24,29 @@ from sdcc_export import run_sdcc_export
 from order_merge import main as order_merge_main
 
 
+def _validate_sdcc_data(filepath):
+	"""检查 SDCC 导出文件是否有实际订单数据。返回 (has_data, row_count)"""
+	try:
+		import pandas as pd
+		df = pd.read_excel(filepath, header=None, dtype=object, engine='openpyxl')
+		df = df.dropna(how='all').reset_index(drop=True)
+		if len(df) == 0:
+			return False, 0
+		# B列(索引1)是单号列，检查是否有包含数字的有效单号
+		order_col_idx = 1 if len(df.columns) > 1 else 0
+		order_col = df.iloc[:, order_col_idx].astype(str)
+
+		def _valid(val):
+			s = val.strip()
+			return bool(s and s.lower() != 'nan' and re.search(r'\d', s))
+
+		count = order_col.apply(_valid).sum()
+		return count > 0, count
+	except Exception as e:
+		print(f"  ⚠ 校验 SDCC 文件失败: {e}")
+		return False, 0
+
+
 def find_customer_file():
 	"""找到最新的客户文件（非 SDCC download_ 开头的 xlsx），含 data/ 子目录"""
 	candidates = []
@@ -154,6 +177,15 @@ if __name__ == "__main__":
 	if not sdcc_result:
 		print("\n❌ SDCC 导出失败，流程终止。")
 		sys.exit(1)
+
+	# 校验 SDCC 文件是否有订单数据（壳牌可能尚未推送订单到 SDCC）
+	has_data, row_count = _validate_sdcc_data(sdcc_result)
+	if not has_data:
+		print(f"\n⚠ SDCC 导出文件无订单数据（壳牌可能尚未推送订单到 SDCC）")
+		print(f"  删除空文件，等待下次定时任务重试...")
+		os.remove(sdcc_result)
+		sys.exit(0)
+	print(f"✓ SDCC 文件校验通过: {row_count} 行订单数据")
 
 	# Step 4: 合并处理 + 发邮件
 	print("\n" + "=" * 60)

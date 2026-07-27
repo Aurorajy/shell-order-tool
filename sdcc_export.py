@@ -62,8 +62,25 @@ def run_sdcc_export(sdcc_date_str=None):
 	# 今天已经导出过了，跳过
 	target_file = os.path.join(DOWNLOAD_DIR, f"download_{sdcc_date_compact}.xlsx")
 	if os.path.exists(target_file):
-		print(f"✅ 今天已导出: {target_file}")
-		return target_file
+		# 检查文件是否有实际数据（不是空壳）
+		try:
+			from openpyxl import load_workbook
+			wb = load_workbook(target_file, read_only=True)
+			ws = wb.active
+			row_count = 0
+			for row in ws.iter_rows(min_row=1, max_row=50):
+				if any(cell.value is not None for cell in row):
+					row_count += 1
+			wb.close()
+			if row_count <= 1:
+				print(f"  上次导出为空文件，删除并重新导出...")
+				os.remove(target_file)
+			else:
+				print(f"✅ 今天已导出（{row_count}+ 行）: {target_file}")
+				return target_file
+		except Exception:
+			print(f"✅ 今天已导出: {target_file}")
+			return target_file
 
 	options = webdriver.ChromeOptions()
 	options.add_argument("--log-level=3")
