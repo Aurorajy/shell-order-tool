@@ -57,13 +57,13 @@ def _parse_carrier_config():
 
     # 内置默认值
     return {
-        "奥联":   ["黑龙江", "吉林"],
-        "富力达": ["河北", "辽宁"],
+        "富力达": ["河北", "辽宁", "黑龙江"],
         "汇利":   ["内蒙古", "新疆", "青海", "河南", "山西", "西藏"],
         "联众":   ["山东"],
         "津京通达": ["天津"],
         "金博通": ["海南", "重庆", "四川", "江西", "福建", "安徽", "湖南", "湖北",
                    "广东", "贵州", "云南", "广西", "浙江", "上海", "江苏"],
+        "国帅宇航": ["吉林"],
     }
 
 CARRIER_MAP = _parse_carrier_config()
@@ -116,10 +116,6 @@ def _parse_carrier_emails():
 
     # 内置默认值
     return {
-        "奥联":   ";".join([
-            "shikun.0101@163.com", "chenjibing@sinotrans.com",
-            "yn416@163.com", "shelldispatchtj@sinotrans.com", "15620067562@163.com"
-        ]),
         "富力达": ";".join([
             "jinxu_yang@163.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
         ]),
@@ -134,6 +130,9 @@ def _parse_carrier_emails():
         ]),
         "金博通": ";".join([
             "tjybwlgs@126.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
+        ]),
+        "国帅宇航": ";".join([
+            "2910739539@qq.com", "chenjibing@sinotrans.com", "shelldispatchtj@sinotrans.com"
         ]),
     }
 
