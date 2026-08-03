@@ -44,9 +44,12 @@ def download_customer_attachment(date_override=None):
     保存到 data/YYYYMMDD/ 目录，返回下载的文件路径，失败返回 None。
     """
     today = date_override or datetime.now()
-    target = today + timedelta(days=1)  # 客户提前一天发次日的发货计划
-    date_str = f"{target.year}/{target.month}/{target.day}"
-    date_str2 = f"{target.year}/{target.month:02d}/{target.day:02d}"
+    # 客户通常提前一天发次日的发货计划，但有时（如周一）当天发当天
+    targets = [today + timedelta(days=1), today]
+    date_strs = []
+    for t in targets:
+        date_strs.append(f"{t.year}/{t.month}/{t.day}")
+        date_strs.append(f"{t.year}/{t.month:02d}/{t.day:02d}")
     date_dir = os.path.join(SCRIPT_DIR, "data", today.strftime("%Y%m%d"))
     os.makedirs(date_dir, exist_ok=True)
 
@@ -93,7 +96,7 @@ def download_customer_attachment(date_override=None):
 
         if not ("Shell" in subject_clean and "发货计划" in subject_clean):
             continue
-        if not (date_str in subject_clean or date_str2 in subject_clean):
+        if not any(ds in subject_clean for ds in date_strs):
             continue
 
         print(f"  匹配: {subject_clean[:60]}")
