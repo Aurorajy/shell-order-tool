@@ -1,5 +1,5 @@
 """
-从 QQ 邮箱下载客户发货计划附件
+从公司邮箱下载客户发货计划附件
 """
 
 import imaplib
@@ -40,16 +40,11 @@ AUTH_CODE = os.environ["EMAIL_PASSWORD"]
 
 def download_customer_attachment(date_override=None):
     """
-    下载今天（或指定日期）的客户发货计划附件。
+    下载今天收到的最新一封带附件的 Shell 发货计划邮件。
+    不再匹配邮件标题中的日期，只看邮件接收时间是否为今天。
     保存到 data/YYYYMMDD/ 目录，返回下载的文件路径，失败返回 None。
     """
     today = date_override or datetime.now()
-    # 客户通常提前一天发次日的发货计划，但有时（如周一）当天发当天
-    targets = [today + timedelta(days=1), today]
-    date_strs = []
-    for t in targets:
-        date_strs.append(f"{t.year}/{t.month}/{t.day}")
-        date_strs.append(f"{t.year}/{t.month:02d}/{t.day:02d}")
     date_dir = os.path.join(SCRIPT_DIR, "data", today.strftime("%Y%m%d"))
     os.makedirs(date_dir, exist_ok=True)
 
@@ -60,6 +55,11 @@ def download_customer_attachment(date_override=None):
         latest = max(existing, key=os.path.getmtime)
         print(f"✅ 今天已有附件: {os.path.basename(latest)}")
         return latest
+
+    # IMAP SINCE 日期格式: DD-Mon-YYYY，从昨天起搜（留一天余量）
+    months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    yday = today - timedelta(days=1)
+    since_yesterday = f"{yday.day:02d}-{months[yday.month-1]}-{yday.year}"
 
     print(f"连接 {IMAP_SERVER}:{IMAP_PORT} ...")
     mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
@@ -72,31 +72,42 @@ def download_customer_attachment(date_override=None):
         mail.logout()
         return None
 
-    # IMAP 不支持中文搜索，用英文关键词搜
-    status, data = mail.search(None, 'SUBJECT', 'Shell')
+    # 只搜从昨天起收到的邮件（留一天余量），大幅减少搜索范围
+    status, data = mail.search(None, '(SUBJECT "Shell" SINCE {})'.format(since_yesterday))
     email_ids = data[0].split() if data[0] else []
 
     if not email_ids:
-        print("❌ 未找到相关邮件")
+        print("❌ 未找到今天收到的 Shell 邮件")
         mail.logout()
         return None
 
-    print(f"找到 {len(email_ids)} 封含 'Shell' 的邮件")
+    print(f"从昨天起收到 {len(email_ids)} 封含 'Shell' 的邮件")
 
+    # 从最新到最旧遍历，取第一封匹配的（带附件）
     downloaded = None
     for eid in reversed(email_ids):
         status, msg_data = mail.fetch(eid, "(RFC822)")
         if status != "OK":
             continue
         msg = email.message_from_bytes(msg_data[0][1])
+
+        # 只处理今天收到的邮件
+        msg_date_str = msg.get("Date", "")
+        try:
+            # 解析邮件日期，格式: "Mon, 3 Aug 2026 13:55:18 +0800"
+            from email.utils import parsedate_to_datetime
+            msg_date = parsedate_to_datetime(msg_date_str)
+            if msg_date.date() != today.date():
+                continue
+        except Exception:
+            pass  # 无法解析日期则不过滤
+
         subject, enc = decode_header(msg["Subject"])[0]
         if isinstance(subject, bytes):
             subject = subject.decode(enc or "utf-8", errors="replace")
         subject_clean = re.sub(r'^(转发[：:]|Fwd?:|RE:)\s*', '', subject, flags=re.IGNORECASE)
 
         if not ("Shell" in subject_clean and "发货计划" in subject_clean):
-            continue
-        if not any(ds in subject_clean for ds in date_strs):
             continue
 
         print(f"  匹配: {subject_clean[:60]}")
