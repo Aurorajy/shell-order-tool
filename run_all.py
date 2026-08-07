@@ -1,9 +1,13 @@
 """
 壳牌订单调度 - 全流程自动化
-1. 下载客户邮件附件
-2. 从客户表提取最新子表日期，推算 SDCC 导出日期（子表日期-1天）
+1. 下载客户邮件附件（今天收到的邮件）
+2. 验证客户文件中是否有明天日期的子表（如0808）→ 没有就删文件退出
 3. SDCC 导出订单
 4. 合并处理 + 发邮件给各承运商
+
+数据存放规则:
+- data/{今天}/     ← 邮件附件 + SDCC 导出文件
+- output/{明天}/   ← 生成的调度表（明天=子表日期=发货日）
 """
 
 import sys
@@ -48,55 +52,50 @@ def _validate_sdcc_data(filepath):
 
 
 def find_customer_file():
-	"""找到最新的客户文件（非 SDCC download_ 开头的 xlsx），含 data/ 子目录"""
+	"""在 data/{今天}/ 目录下找到客户文件（非 download_ 开头的 xlsx）"""
+	today_dir = os.path.join(SCRIPT_DIR, "data", datetime.now().strftime("%Y%m%d"))
+	if not os.path.isdir(today_dir):
+		return None
 	candidates = []
-	for f in glob.glob(os.path.join(SCRIPT_DIR, "*.xlsx")):
+	for f in glob.glob(os.path.join(today_dir, "*.xlsx")):
 		basename = os.path.basename(f)
 		if not basename.startswith("download_") and not basename.startswith("~$"):
 			candidates.append(f)
-	data_dir = os.path.join(SCRIPT_DIR, "data")
-	if os.path.isdir(data_dir):
-		cutoff = datetime.now() - timedelta(days=7)
-		for sub in sorted(os.listdir(data_dir), reverse=True):
-			sub_path = os.path.join(data_dir, sub)
-			if os.path.isdir(sub_path):
-				m = re.match(r'^(\d{4})(\d{2})(\d{2})$', sub)
-				if m:
-					sub_date = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-					if sub_date < cutoff:
-						continue
-				for f in glob.glob(os.path.join(sub_path, "*.xlsx")):
-					basename = os.path.basename(f)
-					if not basename.startswith("download_") and not basename.startswith("~$"):
-						candidates.append(f)
 	if not candidates:
 		return None
 	return max(candidates, key=os.path.getmtime)
 
 
-def get_latest_subtable_date(customer_file):
-	"""读取客户文件，返回最新子表日期 (month, day)"""
+def get_tomorrow_sheet(customer_file):
+	"""验证客户文件是否包含明天日期（MMDD，如0808）的子表。
+	返回 (month, day)，失败返回 None"""
+	tomorrow = datetime.now() + timedelta(days=1)
+	expected = tomorrow.strftime("%m%d")  # "0808"
+
 	try:
 		from openpyxl import load_workbook
 		wb = load_workbook(customer_file, read_only=True)
 		sheets = wb.sheetnames
 		wb.close()
 
-		max_md = (0, 0)
-		for name in sheets:
-			m = re.match(r'^(\d{2})(\d{2})$', name.strip())
-			if m:
-				mm, dd = int(m.group(1)), int(m.group(2))
-				if 1 <= mm <= 12 and 1 <= dd <= 31:
-					if (mm, dd) > max_md:
-						max_md = (mm, dd)
+		if expected in sheets:
+			print(f"  客户表子表: {expected}")
+			return (tomorrow.month, tomorrow.day)
 
-		if max_md != (0, 0):
-			print(f"  客户表最新子表: {max_md[0]:02d}{max_md[1]:02d}")
-			return max_md
+		# 兼容 "8.8" "08.08" "8-8" 等变体
+		mm, dd = tomorrow.month, tomorrow.day
+		variants = [f"{mm}.{dd}", f"{mm:02d}.{dd:02d}", f"{mm}-{dd}", f"{mm:02d}-{dd:02d}"]
+		for v in variants:
+			if v in sheets:
+				print(f"  客户表子表: {v}")
+				return (tomorrow.month, tomorrow.day)
+
+		print(f"  ⚠ 未找到明天日期子表 '{expected}'")
+		print(f"  文件中的子表: {sheets}")
+		return None
 	except Exception as e:
 		print(f"  ⚠ 读取客户文件失败: {e}")
-	return None
+		return None
 
 
 def calc_sdcc_date(sub_mm, sub_dd):
@@ -136,31 +135,34 @@ if __name__ == "__main__":
 		print("\n❌ 今天未收到新的客户发货计划邮件，流程终止。")
 		sys.exit(0)
 
-	# Step 2: 推算 SDCC 导出日期 + 确定客户目标日期
+	# Step 2: 验证客户文件子表日期 = 明天
 	print("\n" + "=" * 60)
-	print("  Step 2/4: 推算 SDCC 导出日期")
+	print("  Step 2/4: 验证客户文件子表日期")
 	print("=" * 60)
 	customer_file = find_customer_file()
 	sdcc_date_str = None
 	customer_target_str = None
-	if customer_file:
-		print(f"客户文件: {os.path.basename(customer_file)}")
-		md = get_latest_subtable_date(customer_file)
-		if md:
-			sdcc_date_str = calc_sdcc_date(md[0], md[1])
-			os.environ["SDCC_DATE"] = sdcc_date_str
-			print(f"SDCC 导出日期（子表-1天）: {sdcc_date_str}")
+	if not customer_file:
+		print("\n❌ 未找到客户文件，流程终止。")
+		sys.exit(0)
 
-			# 客户目标日期 = 子表日期（即 SDCC 日期 + 1 天）
-			sub_date = datetime(today.year, md[0], md[1])
-			if sub_date > today + timedelta(days=60):
-				sub_date = datetime(today.year - 1, md[0], md[1])
-			customer_target_str = sub_date.strftime("%Y%m%d")
-			print(f"客户目标日期（子表日期）: {customer_target_str}")
-		else:
-			print("未能提取子表日期，SDCC 将使用今天")
-	else:
-		print("未找到客户文件，SDCC 将使用今天")
+	print(f"客户文件: {os.path.basename(customer_file)}")
+	md = get_tomorrow_sheet(customer_file)
+	if not md:
+		print(f"\n❌ 客户文件子表命名异常（未找到明天日期的子表），删除文件并等待下次重试。")
+		os.remove(customer_file)
+		sys.exit(0)
+
+	sdcc_date_str = calc_sdcc_date(md[0], md[1])
+	os.environ["SDCC_DATE"] = sdcc_date_str
+	print(f"SDCC 导出日期（子表-1天）: {sdcc_date_str}")
+
+	# 客户目标日期 = 子表日期（即明天）
+	sub_date = datetime(today.year, md[0], md[1])
+	if sub_date > today + timedelta(days=60):
+		sub_date = datetime(today.year - 1, md[0], md[1])
+	customer_target_str = sub_date.strftime("%Y%m%d")
+	print(f"输出目录: output/{customer_target_str}/")
 
 	# 精确检查：输出目录已存在 → 今天已完成
 	if customer_target_str:
